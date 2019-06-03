@@ -12,13 +12,13 @@ then:
   created: { $fromNow: '0 sec' }
   deadline: { $fromNow: '1 day' }
   expires:
-    $if: 'event.event == "push"'
+    $if: '(event.event == "push") || (event.event == "tag")'
     then: { $fromNow: '6 months' }
     else: { $fromNow: '7 days' }
 
   extra:
     github:
-      $if: 'event.event == "push"'
+      $if: '(event.event == "push") || (event.event == "tag")'
       then: { $eval: taskcluster.github_events.merge }
       else: { $eval: taskcluster.github_events.pull_request }
 
@@ -26,6 +26,7 @@ then:
     { $eval: build.routes }
 
   payload:
+    upload_targets: { $eval: build.upload_targets }
     artifacts_deps:
       python:
         $map: { $eval: build.artifacts_deps.python }
@@ -33,6 +34,18 @@ then:
           $eval: as_slugid(b)
       javascript:
         $map: { $eval: build.artifacts_deps.javascript }
+        each(b):
+          $eval: as_slugid(b)
+      java_aar:
+        $map: { $eval: build.artifacts_deps.java_aar }
+        each(b):
+          $eval: as_slugid(b)
+      cpp:
+        $map: { $eval: build.artifacts_deps.cpp }
+        each(b):
+          $eval: as_slugid(b)
+      nuget:
+        $map: { $eval: build.artifacts_deps.nuget }
         each(b):
           $eval: as_slugid(b)
 

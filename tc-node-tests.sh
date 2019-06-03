@@ -5,7 +5,6 @@ set -xe
 source $(dirname "$0")/tc-tests-utils.sh
 
 nodever=$1
-aot_model=$2
 
 if [ -z "${nodever}" ]; then
     echo "No node version given, aborting."
@@ -16,23 +15,13 @@ download_data
 
 node --version
 npm --version
-if [ "${aot_model}" = "--aot" ]; then
-    npm install ${DEEPSPEECH_AOT_ARTIFACTS_ROOT}/deepspeech-0.1.0.tgz
-else
-    npm install ${DEEPSPEECH_NODEJS}/deepspeech-0.1.0.tgz
-fi
 
-export PATH=$HOME/node_modules/.bin/:$PATH
+NODE_ROOT="${DS_ROOT_TASK}/ds-test/"
+export NODE_PATH="${NODE_ROOT}/node_modules/"
+export PATH="${NODE_ROOT}:${NODE_PATH}/.bin/:$PATH"
 
-phrase_pbmodel_nolm=$(deepspeech /tmp/${model_name} /tmp/LDC93S1.wav /tmp/alphabet.txt)
-assert_correct_ldc93s1 "${phrase_pbmodel_nolm}"
+npm install --prefix ${NODE_ROOT} ${DEEPSPEECH_NODEJS}/deepspeech-${DS_VERSION}.tgz
 
-phrase_pbmodel_withlm=$(deepspeech /tmp/${model_name} /tmp/LDC93S1.wav /tmp/alphabet.txt /tmp/lm.binary /tmp/trie)
-assert_correct_ldc93s1 "${phrase_pbmodel_withlm}"
+check_runtime_nodejs
 
-if [ "${aot_model}" = "--aot" ]; then
-    phrase_somodel_nolm=$(deepspeech "" /tmp/LDC93S1.wav /tmp/alphabet.txt)
-    phrase_somodel_withlm=$(deepspeech "" /tmp/LDC93S1.wav /tmp/alphabet.txt /tmp/lm.binary /tmp/trie)
-
-    assert_correct_ldc93s1_somodel "${phrase_somodel_nolm}" "${phrase_somodel_withlm}"
-fi
+run_all_inference_tests

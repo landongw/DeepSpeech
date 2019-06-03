@@ -1,197 +1,106 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function
+
+import os
+
+from functools import partial
+
+import numpy as np
 import pandas
 import tensorflow as tf
+import datetime
 
-from threading import Thread
-from math import ceil
-from six.moves import range
-from util.audio import audiofile_to_input_vector
-from util.gpu import get_available_gpus
-from util.text import ctc_label_dense_to_sparse, text_to_char_array
+from tensorflow.contrib.framework.python.ops import audio_ops as contrib_audio
 
-class ModelFeeder(object):
-    '''
-    Feeds data into a model.
-    Feeding is parallelized by independent units called tower feeders (usually one per GPU).
-    Each tower feeder provides data from three runtime switchable sources (train, dev, test).
-    These sources are to be provided by three DataSet instances whos references are kept.
-    Creates, owns and delegates to tower_feeder_count internal tower feeder objects.
-    '''
-    def __init__(self,
-                 train_set,
-                 dev_set,
-                 test_set,
-                 numcep,
-                 numcontext,
-                 alphabet,
-                 tower_feeder_count=-1,
-                 threads_per_queue=2):
+from util.config import Config
+from util.text import text_to_char_array
 
-        self.train = train_set
-        self.dev = dev_set
-        self.test = test_set
-        self.sets = [train_set, dev_set, test_set]
-        self.numcep = numcep
-        self.numcontext = numcontext
-        self.tower_feeder_count = max(len(get_available_gpus()), 1) if tower_feeder_count < 0 else tower_feeder_count
-        self.threads_per_queue = threads_per_queue
 
-        self.ph_x = tf.placeholder(tf.float32, [None, numcep + (2 * numcep * numcontext)])
-        self.ph_x_length = tf.placeholder(tf.int32, [])
-        self.ph_y = tf.placeholder(tf.int32, [None,])
-        self.ph_y_length = tf.placeholder(tf.int32, [])
-        self.ph_batch_size = tf.placeholder(tf.int32, [])
-        self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
+def read_csvs(csv_files):
+    source_data = None
+    for csv in csv_files:
+        file = pandas.read_csv(csv, encoding='utf-8', na_filter=False)
+        #FIXME: not cross-platform
+        csv_dir = os.path.dirname(os.path.abspath(csv))
+        file['wav_filename'] = file['wav_filename'].str.replace(r'(^[^/])', lambda m: os.path.join(csv_dir, m.group(1))) # pylint: disable=cell-var-from-loop
+        if source_data is None:
+            source_data = file
+        else:
+            source_data = source_data.append(file)
+    return source_data
 
-        self._tower_feeders = [_TowerFeeder(self, i, alphabet) for i in range(self.tower_feeder_count)]
 
-    def start_queue_threads(self, session, coord):
-        '''
-        Starts required queue threads on all tower feeders.
-        '''
-        queue_threads = []
-        for tower_feeder in self._tower_feeders:
-            queue_threads += tower_feeder.start_queue_threads(session, coord)
-        return queue_threads
+def samples_to_mfccs(samples, sample_rate):
+    spectrogram = contrib_audio.audio_spectrogram(samples,
+                                                  window_size=Config.audio_window_samples,
+                                                  stride=Config.audio_step_samples,
+                                                  magnitude_squared=True)
+    mfccs = contrib_audio.mfcc(spectrogram, sample_rate, dct_coefficient_count=Config.n_input)
+    mfccs = tf.reshape(mfccs, [-1, Config.n_input])
 
-    def close_queues(self, session):
-        '''
-        Closes queues of all tower feeders.
-        '''
-        for tower_feeder in self._tower_feeders:
-            tower_feeder.close_queues(session)
+    return mfccs, tf.shape(mfccs)[0]
 
-    def set_data_set(self, feed_dict, data_set):
-        '''
-        Switches all tower feeders to a different source DataSet.
-        The provided feed_dict will get enriched with required placeholder/value pairs.
-        The DataSet has to be one of those that got passed into the constructor.
-        '''
-        index = self.sets.index(data_set)
-        assert index >= 0
-        feed_dict[self.ph_queue_selector] = index
-        feed_dict[self.ph_batch_size] = data_set.batch_size
 
-    def next_batch(self, tower_feeder_index):
-        '''
-        Draw the next batch from one of the tower feeders.
-        '''
-        return self._tower_feeders[tower_feeder_index].next_batch()
+def audiofile_to_features(wav_filename):
+    samples = tf.read_file(wav_filename)
+    decoded = contrib_audio.decode_wav(samples, desired_channels=1)
+    features, features_len = samples_to_mfccs(decoded.audio, decoded.sample_rate)
 
-class DataSet(object):
-    '''
-    Represents a collection of audio samples and their respective transcriptions.
-    Takes a set of CSV files produced by importers in /bin.
-    '''
-    def __init__(self, csvs, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1):
-        self.batch_size = batch_size
-        self.next_index = next_index
-        self.files = None
-        for csv in csvs:
-            file = pandas.read_csv(csv, encoding='utf-8')
-            if self.files is None:
-                self.files = file
-            else:
-                self.files = self.files.append(file)
-        self.files = self.files.sort_values(by="wav_filesize", ascending=ascending) \
-                         .ix[:, ["wav_filename", "transcript"]] \
-                         .values[skip:]
-        if limit > 0:
-            self.files = self.files[:limit]
-        self.total_batches = int(ceil(len(self.files) / batch_size))
+    return features, features_len
 
-class _DataSetLoader(object):
-    '''
-    Internal class that represents an input queue with data from one of the DataSet objects.
-    Each tower feeder will create and combine three data set loaders to one switchable queue.
-    Keeps a ModelFeeder reference for accessing shared settings and placeholders.
-    Keeps a DataSet reference to access its samples.
-    '''
-    def __init__(self, model_feeder, data_set, alphabet):
-        self._model_feeder = model_feeder
-        self._data_set = data_set
-        self.queue = tf.PaddingFIFOQueue(shapes=[[None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [], [None,], []],
-                                                  dtypes=[tf.float32, tf.int32, tf.int32, tf.int32],
-                                                  capacity=data_set.batch_size * 2)
-        self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
-        self._close_op = self.queue.close(cancel_pending_enqueues=True)
-        self._alphabet = alphabet
 
-    def start_queue_threads(self, session, coord):
-        '''
-        Starts concurrent queue threads for reading samples from the data set.
-        '''
-        queue_threads = [Thread(target=self._populate_batch_queue, args=(session, coord))
-                         for i in range(self._model_feeder.threads_per_queue)]
-        for queue_thread in queue_threads:
-            coord.register_thread(queue_thread)
-            queue_thread.daemon = True
-            queue_thread.start()
-        return queue_threads
+def entry_to_features(wav_filename, transcript):
+    # https://bugs.python.org/issue32117
+    features, features_len = audiofile_to_features(wav_filename)
+    return features, features_len, tf.SparseTensor(*transcript)
 
-    def close_queue(self, session):
-        '''
-        Closes the data set queue.
-        '''
-        session.run(self._close_op)
 
-    def _populate_batch_queue(self, session, coord):
-        '''
-        Queue thread routine.
-        '''
-        file_count = len(self._data_set.files)
-        index = -1
-        while not coord.should_stop():
-            index = self._data_set.next_index(index) % file_count
-            wav_file, transcript = self._data_set.files[index]
-            source = audiofile_to_input_vector(wav_file, self._model_feeder.numcep, self._model_feeder.numcontext)
-            source_len = len(source)
-            target = text_to_char_array(transcript, self._alphabet)
-            target_len = len(target)
-            if source_len < target_len:
-                raise ValueError('Error: Audio file {} is too short for transcription.'.format(wav_file))
-            try:
-                session.run(self._enqueue_op, feed_dict={ self._model_feeder.ph_x: source,
-                                                          self._model_feeder.ph_x_length: source_len,
-                                                          self._model_feeder.ph_y: target,
-                                                          self._model_feeder.ph_y_length: target_len })
-            except tf.errors.CancelledError:
-                return
+def to_sparse_tuple(sequence):
+    r"""Creates a sparse representention of ``sequence``.
+        Returns a tuple with (indices, values, shape)
+    """
+    indices = np.asarray(list(zip([0]*len(sequence), range(len(sequence)))), dtype=np.int64)
+    shape = np.asarray([1, len(sequence)], dtype=np.int64)
+    return indices, sequence, shape
 
-class _TowerFeeder(object):
-    '''
-    Internal class that represents a switchable input queue for one tower.
-    It creates, owns and combines three _DataSetLoader instances.
-    Keeps a ModelFeeder reference for accessing shared settings and placeholders.
-    '''
-    def __init__(self, model_feeder, index, alphabet):
-        self._model_feeder = model_feeder
-        self.index = index
-        self._loaders = [_DataSetLoader(model_feeder, data_set, alphabet) for data_set in model_feeder.sets]
-        self._queues = [set_queue.queue for set_queue in self._loaders]
-        self._queue = tf.QueueBase.from_list(model_feeder.ph_queue_selector, self._queues)
-        self._close_op = self._queue.close(cancel_pending_enqueues=True)
 
-    def next_batch(self):
-        '''
-        Draw the next batch from from the combined switchable queue.
-        '''
-        source, source_lengths, target, target_lengths = self._queue.dequeue_many(self._model_feeder.ph_batch_size)
-        sparse_labels = ctc_label_dense_to_sparse(target, target_lengths, self._model_feeder.ph_batch_size)
-        return source, source_lengths, sparse_labels
+def create_dataset(csvs, batch_size, cache_path=''):
+    df = read_csvs(csvs)
+    df.sort_values(by='wav_filesize', inplace=True)
 
-    def start_queue_threads(self, session, coord):
-        '''
-        Starts the queue threads of all owned _DataSetLoader instances.
-        '''
-        queue_threads = []
-        for set_queue in self._loaders:
-            queue_threads += set_queue.start_queue_threads(session, coord)
-        return queue_threads
+    # Convert to character index arrays
+    df['transcript'] = df['transcript'].apply(partial(text_to_char_array, alphabet=Config.alphabet))
 
-    def close_queues(self, session):
-        '''
-        Closes queues of all owned _DataSetLoader instances.
-        '''
-        for set_queue in self._loaders:
-            set_queue.close_queue(session)
+    def generate_values():
+        for _, row in df.iterrows():
+            yield row.wav_filename, to_sparse_tuple(row.transcript)
 
+    # Batching a dataset of 2D SparseTensors creates 3D batches, which fail
+    # when passed to tf.nn.ctc_loss, so we reshape them to remove the extra
+    # dimension here.
+    def sparse_reshape(sparse):
+        shape = sparse.dense_shape
+        return tf.sparse.reshape(sparse, [shape[0], shape[2]])
+
+    def batch_fn(features, features_len, transcripts):
+        features = tf.data.Dataset.zip((features, features_len))
+        features = features.padded_batch(batch_size,
+                                         padded_shapes=([None, Config.n_input], []))
+        transcripts = transcripts.batch(batch_size).map(sparse_reshape)
+        return tf.data.Dataset.zip((features, transcripts))
+
+    num_gpus = len(Config.available_devices)
+
+    dataset = (tf.data.Dataset.from_generator(generate_values,
+                                              output_types=(tf.string, (tf.int64, tf.int32, tf.int64)))
+                              .map(entry_to_features, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                              .cache(cache_path)
+                              .window(batch_size, drop_remainder=True).flat_map(batch_fn)
+                              .prefetch(num_gpus))
+
+    return dataset
+
+def secs_to_hours(secs):
+    hours, remainder = divmod(secs, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return '%d:%02d:%02d' % (hours, minutes, seconds)

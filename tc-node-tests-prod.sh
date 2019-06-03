@@ -14,13 +14,17 @@ fi;
 model_source=${DEEPSPEECH_PROD_MODEL}
 model_name=$(basename "${model_source}")
 
+model_source_mmap=${DEEPSPEECH_PROD_MODEL_MMAP}
+model_name_mmap=$(basename "${model_source_mmap}")
+
 download_data
 
 node --version
 npm --version
-npm install ${DEEPSPEECH_NODEJS}/deepspeech-0.1.0.tgz
+npm install ${DEEPSPEECH_NODEJS}/deepspeech-${DS_VERSION}.tgz
 
 export PATH=$HOME/node_modules/.bin/:$PATH
 
-phrase_pbmodel_withlm=$(deepspeech /tmp/${model_name} /tmp/LDC93S1.wav /tmp/alphabet.txt /tmp/lm.binary /tmp/trie)
-assert_correct_ldc93s1_prodmodel "${phrase_pbmodel_withlm}"
+check_runtime_nodejs
+
+run_prod_inference_tests

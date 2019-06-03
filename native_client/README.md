@@ -1,115 +1,78 @@
-# DeepSpeech native client, language bindings and custom decoder
+# Building DeepSpeech Binaries
 
-This folder contains a native client for running queries on an exported DeepSpeech model, bindings for Python and Node.JS for using an exported DeepSpeech model programatically, and a CTC beam search decoder implementation that scores beams using a language model, needed for training a DeepSpeech model. We provide pre-built binaries for Linux and macOS.
+If you'd like to build the DeepSpeech binaries yourself, you'll need the following pre-requisites downloaded and installed:
 
-## Installation
-
-To download the pre-built binaries, use `util/taskcluster.py`:
-
-```
-python util/taskcluster.py --target /path/to/destination/folder
-```
-
-This will download and extract `native_client.tar.xz` which includes the deepspeech binary and associated libraries as well as the custom decoder OP. `taskcluster.py` will download binaries for the architecture of the host by default, but you can override that behavior with the `--arch` parameter. See the help info with `python util/taskcluster.py -h` for more details.
-
-If you want the CUDA capable version of the binaries, use `--arch gpu`. Note that for now we don't publish CUDA-capable macOS binaries.
-
-If you're looking to train a model, you now have a `libctc_decoder_with_kenlm.so` file that you can pass to the `--decoder_library_path` parameter of `DeepSpeech.py`.
-
-## Required Dependencies
-
-Running inference might require some runtime dependencies to be already installed on your system. Those should be the same, whatever the bindings you are using:
-* libsox2
-* libstdc++6
-* libgomp1
-* libpthread
-
-Please refer to your system's documentation on how to install those dependencies.
-
-## Installing the language bindings
-
-For the Python bindings, you can use `pip`:
-
-```
-pip install deepspeech
-```
-
-Check the [main README](../README.md) for more details about setup and virtual environment use.
-
-### Node.JS bindings
-
-For Node.JS bindings, use `npm install deepspeech` to install it. Please note that as of now, we only support Node.JS versions 4, 5 and 6. Once [SWIG has support](https://github.com/swig/swig/pull/968) we can build for newer versions.
-
-Check the [main README](../README.md) for more details.
-
-## Build Requirements
-
-If you'd like to build the binaries yourself, you'll need the following pre-requisites downloaded/installed:
-
-* [TensorFlow source and requirements](https://www.tensorflow.org/install/install_sources)
+* [Mozilla's TensorFlow `r1.13` branch](https://github.com/mozilla/tensorflow/tree/r1.13)
+* [General TensorFlow requirements](https://www.tensorflow.org/install/install_sources)
 * [libsox](https://sourceforge.net/projects/sox/)
 
-We recommend using our fork of TensorFlow since it includes fixes for common problems encountered when building the native client files, you can [get it here](https://github.com/mozilla/tensorflow/).
+It is required to use our fork of TensorFlow since it includes fixes for common problems encountered when building the native client files.
 
-If you'd like to build the language bindings, you'll also need:
+If you'd like to build the language bindings or the decoder package, you'll also need:
 
-* [SWIG](http://www.swig.org/)
+* [SWIG >= 3.0.12](http://www.swig.org/)
 * [node-pre-gyp](https://github.com/mapbox/node-pre-gyp) (for Node.JS bindings only)
 
-## Preparation
 
-Create a symbolic link in your TensorFlow checkout to the DeepSpeech `native_client` directory. If your DeepSpeech and TensorFlow checkouts are side by side in the same directory, do:
+## Dependencies
+
+If you follow these instructions, you should compile your own binaries of DeepSpeech (built on TensorFlow using Bazel).
+
+For more information on configuring TensorFlow, read the docs up to the end of ["Configure the Build"](https://www.tensorflow.org/install/source#configure_the_build).
+
+### TensorFlow: Clone & Checkout
+
+Clone our fork of TensorFlow and checkout the correct version:
+
+```
+git clone https://github.com/mozilla/tensorflow.git
+git checkout origin/r1.13
+```
+
+### Bazel: Download & Install 
+
+First, [find the version of Bazel](https://www.tensorflow.org/install/source#tested_build_configurations) you need for this TensorFlow release. Next, [download and install the correct version of Bazel](https://docs.bazel.build/versions/master/install.html).
+
+### TensorFlow: Configure with Bazel
+
+After you have installed the correct version of Bazel, configure TensorFlow:
+
+```
+cd tensorflow
+./configure
+```
+
+## Compile DeepSpeech
+
+### Compile `libdeepspeech.so` & `generate_trie`
+
+Within your TensorFlow checkout, create a symbolic link to the DeepSpeech `native_client` directory. Assuming DeepSpeech and TensorFlow checkouts are in the same directory, do:
 
 ```
 cd tensorflow
 ln -s ../DeepSpeech/native_client ./
 ```
 
-## Building
-
-Before building the DeepSpeech client libraries, you will need to prepare your environment to configure and build TensorFlow. Follow the [instructions](https://www.tensorflow.org/install/install_sources) on the TensorFlow site for your platform, up to the end of 'Configure the installation'.
-
-Then you can build the Tensorflow and DeepSpeech libraries.
+You can now use Bazel to build the main DeepSpeech library, `libdeepspeech.so`, as well as the `generate_trie` binary. Add `--config=cuda` if you want a CUDA build.
 
 ```
-bazel build -c opt --copt=-O3 //tensorflow:libtensorflow_cc.so //tensorflow:libtensorflow_framework.so //native_client:deepspeech //native_client:deepspeech_utils //native_client:libctc_decoder_with_kenlm.so //native_client:generate_trie
+bazel build --config=monolithic -c opt --copt=-O3 --copt="-D_GLIBCXX_USE_CXX11_ABI=0" --copt=-fvisibility=hidden //native_client:libdeepspeech.so //native_client:generate_trie
 ```
 
-Finally, you can change to the `native_client` directory and use the `Makefile`. By default, the `Makefile` will assume there is a TensorFlow checkout in a directory above the DeepSpeech checkout. If that is not the case, set the environment variable `TFDIR` to point to the right directory.
+The generated binaries will be saved to `bazel-bin/native_client/`.
+
+### Compile Language Bindings
+
+Now, `cd` into the `DeepSpeech/native_client` directory and use the `Makefile` to build all the language bindings (C++ client, Python package, Nodejs package, etc.). Set the environment variable `TFDIR` to point to your TensorFlow checkout.
 
 ```
+TFDIR=~/tensorflow
 cd ../DeepSpeech/native_client
 make deepspeech
 ```
 
-## Building with AOT model
 
-First, please note that this is still experimental. AOT model relies on TensorFlow's [AOT tfcompile](https://www.tensorflow.org/performance/xla/tfcompile) tooling. It takes a protocol buffer file graph as input, and produces a .so library that one can call from C++ code.
-To experiment, you will need to build TensorFlow from [github.com/mozilla/tensorflow master branch](https://github.com/mozilla/tensorflow). Follow TensorFlow's documentation for the configuration of your system.
-When building, you will have to add some extra parameter and targets.
-
-Bazel defines:
-* `--define=DS_NATIVE_MODEL=1`: to toggle AOT support.
-* `--define=DS_MODEL_TIMESTEPS=x`: to define how many timesteps you want to handle. Relying on prebuilt model implies we need to use a fixed value for how much audio value we want to use. Timesteps defines that value, and an audio file bigger than this will just be dealt with over several samples. This means there's a compromise between quality and minimum audio segment you want to handle.
-* `--define=DS_MODEL_FRAMESIZE=y`: to define your model framesize, this is the second component of your model's input layer shape. Can be extracted using TensorFlow's `summarize_graph` tool.
-* `--define=DS_MODEL_FILE=/path/to/graph.pb`: the model you want to use
-
-Bazel targets:
-* `//native_client:deepspeech_model`: to produce `libdeepspeech_model.so`
-* `//tensorflow/compiler/aot:runtime `, `//tensorflow/compiler/xla/service/cpu:runtime_matmul`, `//tensorflow/compiler/xla:executable_run_options`
-
-In the end, the previous example becomes:
-
-```
-bazel build -c opt --copt=-O3 --define=DS_NATIVE_MODEL=1 --define=DS_MODEL_TIMESTEPS=64 --define=DS_MODEL_FRAMESIZE=494 --define=DS_MODEL_FILE=/tmp/model.ldc93s1.pb //tensorflow:libtensorflow_cc.so //tensorflow:libtensorflow_framework.so //native_client:deepspeech_model //tensorflow/compiler/aot:runtime //tensorflow/compiler/xla/service/cpu:runtime_matmul //tensorflow/compiler/xla:executable_run_options //native_client:deepspeech //native_client:deepspeech_utils //native_client:libctc_decoder_with_kenlm.so //native_client:generate_trie
-```
-
-Later, when building either `deepspeech` binaries or bindings, you will have to add some extra variables to your `make` command-line (assuming `TFDIR` points to your TensorFlow's git clone):
-```
-EXTRA_LDFLAGS="-L${TFDIR}/bazel-bin/tensorflow/compiler/xla/ -L${TFDIR}/bazel-bin/tensorflow/compiler/aot/ -L${TFDIR}/bazel-bin/tensorflow/compiler/xla/service/cpu/" EXTRA_LIBS="-ldeepspeech_model -lruntime -lexecutable_run_options -lruntime_matmul"
-```
-
-## Installing
+## Installing your own Binaries
 
 After building, the library files and binary can optionally be installed to a system path for ease of development. This is also a required step for bindings generation.
 
@@ -119,34 +82,100 @@ PREFIX=/usr/local sudo make install
 
 It is assumed that `$PREFIX/lib` is a valid library path, otherwise you may need to alter your environment.
 
-## Running
-
-The client can be run via the `Makefile`. The client will accept audio of any format your installation of SoX supports.
-
-```
-ARGS="/path/to/output_graph.pb /path/to/audio/file.ogg" make run
-```
-
-## Python bindings
+### Install Python bindings
 
 Included are a set of generated Python bindings. After following the above build and installation instructions, these can be installed by executing the following commands (or equivalent on your system):
 
 ```
-cd native_client
+cd native_client/python
 make bindings
-sudo pip install dist/deepspeech*
+pip install dist/deepspeech*
 ```
 
 The API mirrors the C++ API and is demonstrated in [client.py](python/client.py). Refer to [deepspeech.h](deepspeech.h) for documentation.
 
-## Node.JS bindings
+### Install Node.JS bindings
 
 After following the above build and installation instructions, the Node.JS bindings can be built:
 
 ```
 cd native_client/javascript
-make package
+make build
 make npm-pack
 ```
 
-This will create the package `deepspeech-0.1.0.tgz` in `native_client/javascript`.
+This will create the package `deepspeech-VERSION.tgz` in `native_client/javascript`.
+
+### Install the CTC decoder package
+
+To build the `ds_ctcdecoder` package, you'll need the general requirements listed above (in particular SWIG). The command below builds the bindings using eight (8) processes for compilation. Adjust the parameter accordingly for more or less parallelism.
+
+```
+cd native_client/ctcdecode
+make bindings NUM_PROCESSES=8
+pip install dist/*.whl
+```
+
+## Cross-building
+
+### RPi3 ARMv7 and LePotato ARM64
+
+We do support cross-compilation. Please refer to our `mozilla/tensorflow` fork, where we define the following `--config` flags:
+
+ - `--config=rpi3` and `--config=rpi3_opt` for Raspbian / ARMv7
+ - `--config=rpi3-armv8` and `--config=rpi3-armv8_opt` for ARMBian / ARM64
+
+So your command line for `RPi3` and `ARMv7` should look like:
+
+```
+bazel build --config=monolithic --config=rpi3 --config=rpi3_opt -c opt --copt=-O3 --copt=-fvisibility=hidden //native_client:libdeepspeech.so //native_client:generate_trie
+```
+
+And your command line for `LePotato` and `ARM64` should look like:
+
+```
+bazel build --config=monolithic --config=rpi3-armv8 --config=rpi3-armv8_opt -c opt --copt=-O3 --copt=-fvisibility=hidden //native_client:libdeepspeech.so //native_client:generate_trie
+```
+
+While we test only on RPi3 Raspbian Stretch and LePotato ARMBian stretch, anything compatible with `armv7-a cortex-a53` or `armv8-a cortex-a53` should be fine.
+
+The `deepspeech` binary can also be cross-built, with `TARGET=rpi3` or `TARGET=rpi3-armv8`. This might require you to setup a system tree using the tool `multistrap` and the multitrap configuration files: `native_client/multistrap_armbian64_stretch.conf` and `native_client/multistrap_raspbian_stretch.conf`.
+The path of the system tree can be overridden from the default values defined in `definitions.mk` through the `RASPBIAN` `make` variable.
+
+```
+cd ../DeepSpeech/native_client
+make TARGET=<system> deepspeech
+```
+
+### Android devices
+
+We have preliminary support for Android relying on TensorFlow Lite, with Java and JNI bindinds. For more details on how to experiment with those, please refer to `native_client/java/README.md`.
+
+Please refer to TensorFlow documentation on how to setup the environment to build for Android (SDK and NDK required).
+
+You can build the `libdeepspeech.so` using (ARMv7):
+
+```
+bazel build --config=monolithic --config=android --config=android_arm --define=runtime=tflite --action_env ANDROID_NDK_API_LEVEL=21 --cxxopt=-std=c++11 --copt=-D_GLIBCXX_USE_C99 //native_client:libdeepspeech.so
+```
+
+Or (ARM64):
+
+```
+bazel build --config=monolithic --config=android --config=android_arm64 --define=runtime=tflite --action_env ANDROID_NDK_API_LEVEL=21 --cxxopt=-std=c++11 --copt=-D_GLIBCXX_USE_C99 //native_client:libdeepspeech.so
+```
+
+Building the `deepspeech` binary will happen through `ndk-build` (ARMv7):
+
+```
+cd ../DeepSpeech/native_client
+$ANDROID_NDK_HOME/ndk-build APP_PLATFORM=android-21 APP_BUILD_SCRIPT=$(pwd)/Android.mk NDK_PROJECT_PATH=$(pwd) APP_STL=c++_shared TFDIR=$(pwd)/../../tensorflow/ TARGET_ARCH_ABI=armeabi-v7a
+```
+
+And (ARM64):
+
+```
+cd ../DeepSpeech/native_client
+$ANDROID_NDK_HOME/ndk-build APP_PLATFORM=android-21 APP_BUILD_SCRIPT=$(pwd)/Android.mk NDK_PROJECT_PATH=$(pwd) APP_STL=c++_shared TFDIR=$(pwd)/../../tensorflowx/ TARGET_ARCH_ABI=arm64-v8a 
+```
+
